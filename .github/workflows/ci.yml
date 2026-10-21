@@ -1,7 +1,7 @@
 name: CI
 
 # Runs on every pull request (against the PR's merge ref) and on direct
-# pushes to main. The `tests` job is the gate wired into branch protection;
+# pushes to main. Require the `tests` check in GitHub branch protection;
 # the `mutation` job is informational and never blocks.
 on:
   pull_request:
