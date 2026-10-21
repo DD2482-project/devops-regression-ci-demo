@@ -1,50 +1,47 @@
 name: Jules auto-fix (sandbox only)
 
-# Self-healing CI demo: when the main CI workflow finishes with a FAILURE on the
-# sandbox branch, call the Jules API and ask it to fix the code. Jules works in
-# its own cloud VM and opens a pull request — it never merges on its own, and a
-# human still reviews.
-#
-# SAFETY: the `if:` below is a hard allow-list by naming convention. It only
-# fires for branches whose name starts with the SANDBOX_PREFIX ("jules-"), so you
-# can create as many jules-* test branches as you want without editing this file.
-# main, regression/discount-bug and fix/discount-bug do NOT start with "jules-",
-# so this can never touch the demo's intentional bug.
+# A failed CI run on the sandbox PR asks Jules to propose a fix. Jules opens
+# a separate PR; CI tests that PR, and a developer decides whether to merge it.
 
 on:
   workflow_run:
-    workflows: ["CI"]        # must match the `name:` field of your ci.yml
+    workflows: ["CI"]
     types: [completed]
 
 permissions:
   contents: read
 
 env:
-  SANDBOX_PREFIX: "jules-"   # Jules may only touch branches named jules-*
   JULES_SOURCE: sources/github/DD2482-project/devops-regression-ci-demo
 
 jobs:
   trigger-jules:
-    # Fire only when the CI run FAILED and it was on a jules-* branch.
+    # Only the original, same-repository sandbox PR starts Jules.
+    # Jules's new PR has a different head branch, preventing loops.
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
-      startsWith(github.event.workflow_run.head_branch, 'jules-')
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'jules-sandbox' &&
+      github.event.workflow_run.run_attempt == 1
     runs-on: ubuntu-latest
+    timeout-minutes: 23
     steps:
       - name: Ask Jules to fix the failing sandbox branch
         env:
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
+          FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          FAILED_HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
         run: |
           set -euo pipefail
 
-          # Second safety check in code: refuse any branch not named jules-*.
-          case "$BRANCH" in
-            "$SANDBOX_PREFIX"*) : ;;   # ok, starts with jules-
-            *) echo "Refusing: '$BRANCH' is not a ${SANDBOX_PREFIX}* branch. Aborting."; exit 0 ;;
-          esac
+          if [[ -z "${JULES_API_KEY:-}" ]]; then
+            echo "JULES_API_KEY is not configured" >&2
+            exit 1
+          fi
 
-          prompt="CI failed on branch ${BRANCH}. Only look at files under the scratch/ directory. Fix the bug there so the failing tests pass. Do NOT modify anything outside scratch/."
+          prompt="CI failed on ${BRANCH} at commit ${FAILED_HEAD_SHA}. Failed run: ${FAILED_RUN_URL}. Run the full pytest suite and inspect its failures. Fix the failing code under scratch/ so all tests pass. Do not change files outside scratch/, and do not merge the fix. Open a pull request against ${BRANCH} for developer review."
 
           payload=$(jq -n \
             --arg prompt "$prompt" \
@@ -55,11 +52,42 @@ jobs:
                sourceContext: {
                  source: $source,
                  githubRepoContext: { startingBranch: $branch }
-               }
+               },
+               requirePlanApproval: false,
+               automationMode: "AUTO_CREATE_PR"
              }')
 
-          echo "Creating Jules session for branch $BRANCH ..."
-          curl -sS -X POST "https://jules.googleapis.com/v1alpha/sessions" \
+          echo "Creating Jules session for failed CI run: $FAILED_RUN_URL"
+          response=$(curl --fail-with-body -sS -X POST "https://jules.googleapis.com/v1alpha/sessions" \
             -H "x-goog-api-key: ${JULES_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "$payload"
+            -d "$payload")
+          session=$(jq -er '.name | select(startswith("sessions/"))' <<< "$response")
+          echo "Jules session created: $session"
+          echo "Jules session: $session" >> "$GITHUB_STEP_SUMMARY"
+          echo "Failed CI run: $FAILED_RUN_URL" >> "$GITHUB_STEP_SUMMARY"
+
+          # The session is asynchronous. Keep the run visible until Jules
+          # creates its PR, fails, or reaches the time limit.
+          for ((attempt = 1; attempt <= 40; attempt++)); do
+            result=$(curl --fail-with-body -sS \
+              -H "x-goog-api-key: ${JULES_API_KEY}" \
+              "https://jules.googleapis.com/v1alpha/${session}")
+            pr_url=$(jq -r '[.outputs[]?.pullRequest.url // empty][0] // empty' <<< "$result")
+            if [[ -n "$pr_url" ]]; then
+              echo "Jules fix PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+              echo "Jules opened fix PR: $pr_url"
+              exit 0
+            fi
+
+            state=$(jq -r '.state // "UNKNOWN"' <<< "$result")
+            echo "Jules session state: $state (check $attempt/40)"
+            if [[ "$state" == "FAILED" || "$state" == "COMPLETED" ]]; then
+              echo "Jules finished without opening a fix PR" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+          echo "Timed out waiting for Jules to open a fix PR" >&2
+          exit 1
