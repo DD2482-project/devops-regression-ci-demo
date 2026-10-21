@@ -8,8 +8,8 @@ before I start talking.
 
 "Every pull request triggers the same GitHub Actions workflow. It's four steps:
 install the pinned dependencies, run the full pytest suite, enforce a coverage
-gate, and run a separate mutation-testing job. The test job is the one that can
-block a merge; the mutation job is informational — I'll come back to why."
+gate, and run a separate mutation-testing job. The mutation job now uses its
+result to fail if fewer than 80% of mutants are killed."
 
 ## 2. PR #2 on screen — the regression is stopped (~45s)
 
@@ -33,23 +33,25 @@ stop silent coverage erosion — untested code slipping in unnoticed."
 ## 5. The mutation check — coverage's blind spot (~45s)
 
 "app/ is at ~100% line coverage on main, yet mutmut finds surviving mutants —
-changes no test noticed. 21 killed, 5 survived. Coverage tells you a line ran;
-mutation tells you a test would notice if that line changed. Tie it to the
+changes no test noticed. The observed baseline was 21 killed and 5 survived,
+about 81%, just above our 80% gate. Coverage tells you a line ran; mutation
+tells you a test would notice if that line changed. Tie it to the
 single-item test that stayed green through the bug: the bug discounted the first
 line instead of the whole order, and for a one-item cart those are identical, so
 that test can't tell correct from broken."
 
 ## 6. The trade-off — one honest line (~20s)
 
-"Gates cost CI time, and a too-aggressive threshold blocks PRs on noise. So the
-test job blocks (a failing test is real signal) and mutation stays informational
-(a prompt to write a better test). Tune gates to catch real regressions without
-crying wolf."
+"Gates cost CI time, and a too-aggressive threshold blocks PRs on noise. We
+therefore use the observed baseline to start with an 80% mutation score gate.
+The mutation job fails if the score drops below that, or if the run is incomplete.
+To block merges on this result, add `mutation` to the required status checks in
+branch protection; the workflow alone only marks the job red."
 
 ---
 
 ### Quick reference
 - Test + coverage gate: pytest --cov=app --cov-report=term-missing --cov-fail-under=90
-- Mutation: mutmut run --paths-to-mutate app/pricing.py --runner "python -m pytest -x -q tests/unit"; then mutmut results
+- Mutation: mutmut run --CI --paths-to-mutate app/pricing.py --runner "python -m pytest -x -q tests/unit"; then count `mutmut result-ids` and require >= 80% killed
 - mutmut pinned to 2.4.4 (the 3.x CLI dropped --paths-to-mutate / --runner).
-- Required check on main and regression/discount-bug: the tests job.
+- Current required check on main and regression/discount-bug: the tests job. Add mutation as required if its gate should block merges.

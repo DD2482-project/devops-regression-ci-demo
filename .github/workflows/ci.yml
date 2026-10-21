@@ -1,8 +1,8 @@
 name: CI
 
 # Runs on every pull request (against the PR's merge ref) and on direct
-# pushes to main. The `tests` job is the gate wired into branch protection;
-# the `mutation` job is informational and never blocks.
+# pushes to main. The `tests` job is wired into branch protection. The
+# `mutation` job also fails when the mutation score drops below 80%.
 on:
   pull_request:
   push:
@@ -35,7 +35,27 @@ jobs:
       - name: Install mutmut (pinned)
         run: pip install mutmut==2.4.4
       - name: Mutation testing on the pricing logic
+        run: mutmut run --CI --paths-to-mutate app/pricing.py --runner "python -m pytest -x -q tests/unit"
+      - name: Mutation score gate (>= 80%)
+        shell: bash
         run: |
-          mutmut run --paths-to-mutate app/pricing.py --runner "python -m pytest -x -q tests/unit" || true
-          echo "----- surviving mutants (coverage ran the line; no test noticed the change) -----"
           mutmut results
+          killed=$(mutmut result-ids killed | wc -w)
+          survived=$(mutmut result-ids survived | wc -w)
+          timeout=$(mutmut result-ids timeout | wc -w)
+          suspicious=$(mutmut result-ids suspicious | wc -w)
+          skipped=$(mutmut result-ids skipped | wc -w)
+          untested=$(mutmut result-ids untested | wc -w)
+          total=$((killed + survived))
+          echo "Mutants: $killed killed, $survived survived, $timeout timed out, $suspicious suspicious, $skipped skipped, $untested untested"
+          if (( total == 0 || timeout + suspicious + skipped + untested > 0 )); then
+            echo "Mutation results are incomplete or inconclusive"
+            exit 1
+          fi
+          score=$((killed * 100 / total))
+          echo "Mutation score: $score% (minimum 80%)"
+          echo "Mutation score: $killed/$total killed ($score%; minimum 80%)" >> "$GITHUB_STEP_SUMMARY"
+          if (( killed * 100 < 80 * total )); then
+            echo "Mutation score below 80%"
+            exit 1
+          fi
