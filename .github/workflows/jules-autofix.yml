@@ -1,0 +1,65 @@
+name: Jules auto-fix (sandbox only)
+
+# Self-healing CI demo: when the main CI workflow finishes with a FAILURE on the
+# sandbox branch, call the Jules API and ask it to fix the code. Jules works in
+# its own cloud VM and opens a pull request — it never merges on its own, and a
+# human still reviews.
+#
+# SAFETY: the `if:` below is a hard allow-list by naming convention. It only
+# fires for branches whose name starts with the SANDBOX_PREFIX ("jules-"), so you
+# can create as many jules-* test branches as you want without editing this file.
+# main, regression/discount-bug and fix/discount-bug do NOT start with "jules-",
+# so this can never touch the demo's intentional bug.
+
+on:
+  workflow_run:
+    workflows: ["CI"]        # must match the `name:` field of your ci.yml
+    types: [completed]
+
+permissions:
+  contents: read
+
+env:
+  SANDBOX_PREFIX: "jules-"   # Jules may only touch branches named jules-*
+  JULES_SOURCE: sources/github/DD2482-project/devops-regression-ci-demo
+
+jobs:
+  trigger-jules:
+    # Fire only when the CI run FAILED and it was on a jules-* branch.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      startsWith(github.event.workflow_run.head_branch, 'jules-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask Jules to fix the failing sandbox branch
+        env:
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          # Second safety check in code: refuse any branch not named jules-*.
+          case "$BRANCH" in
+            "$SANDBOX_PREFIX"*) : ;;   # ok, starts with jules-
+            *) echo "Refusing: '$BRANCH' is not a ${SANDBOX_PREFIX}* branch. Aborting."; exit 0 ;;
+          esac
+
+          prompt="CI failed on branch ${BRANCH}. Only look at files under the scratch/ directory. Fix the bug there so the failing tests pass. Do NOT modify anything outside scratch/."
+
+          payload=$(jq -n \
+            --arg prompt "$prompt" \
+            --arg source "$JULES_SOURCE" \
+            --arg branch "$BRANCH" \
+            '{
+               prompt: $prompt,
+               sourceContext: {
+                 source: $source,
+                 githubRepoContext: { startingBranch: $branch }
+               }
+             }')
+
+          echo "Creating Jules session for branch $BRANCH ..."
+          curl -sS -X POST "https://jules.googleapis.com/v1alpha/sessions" \
+            -H "x-goog-api-key: ${JULES_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
