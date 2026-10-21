@@ -65,7 +65,6 @@ def order_total(items: list[Item], code: str | None) -> dict[str, Decimal]:
     ``total`` is ``subtotal - discount`` and is never negative.
     """
     sub = subtotal(items)
-    base = items[0].price if items else Decimal("0")
-    discount = min(discount_amount(base, code), sub)
+    discount = min(discount_amount(sub, code), sub)
     total = max(sub - discount, Decimal("0"))
     return {"subtotal": sub, "discount": discount, "total": total}
